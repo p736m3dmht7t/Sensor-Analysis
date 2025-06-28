@@ -77,6 +77,11 @@ def collect_all_data(input_dir):
     all_data, metadata = [], {}
     for i in range(0, len(all_fits_files) - 1, 2):
         img1_path, img2_path = all_fits_files[i], all_fits_files[i+1]
+        
+        # RESTORED: Print progress for each pair being processed
+        pair_count = i // 2
+        print(f"Processing pair: {pair_count:04d} {os.path.basename(img1_path)} and {os.path.basename(img2_path)}")
+
         img_data1, exp1, filt1, inst1, temp1, gain1, off1 = load_fits_and_extract_info(img1_path)
         img_data2, exp2, _, _, _, _, _ = load_fits_and_extract_info(img2_path)
         
