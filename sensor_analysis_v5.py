@@ -9,7 +9,7 @@ from scipy.stats import linregress
 
 # --- Configuration ---
 # IMPORTANT: Set this to the directory containing your FITS images.
-INPUT_DIR = r"D:\Astrophotography\2025-06-27\FLATS_For_Sensor_Analysis"
+INPUT_DIR = r"D:\Astrophotography\FLATS_For_Sensor_Analysis"
 
 # Heuristics for automatically detecting the 'jump' point in the signal-exposure curve.
 JUMP_DETECTION_STD_MULTIPLIER = 5           # How many std deviations away from initial fit for a new region
@@ -17,7 +17,8 @@ JUMP_DETECTION_CONSECUTIVE_POINTS = 25      # How many consecutive points must d
 JUMP_DETECTION_MIN_EXP = 0.9                # Smallest exposure time to consider for jump detection (to avoid noise at 0 exp time)
 
 # Heuristic for detecting the saturation point by finding where data deviates from the linear fit.
-SATURATION_DETECTION_STD_MULTIPLIER = 5     # How many std deviations below the fit a point must be to be considered saturated.
+SATURATION_DETECTION_STD_MULTIPLIER = 5      # How many std deviations below the fit a point must be to be considered saturated.
+SATURATION_DETECTION_CONSECUTIVE_POINTS = 10 # How many consecutive points must deviate to confirm saturation.
 
 # Keywords to identify filter types in FITS header (case-insensitive check will be used)
 DARK_FILTER_KEYWORDS = ['DARK', 'BIAS'] # Common keywords for dark/bias frames
@@ -160,25 +161,54 @@ def analyze_and_plot_all(all_data, metadata):
     read_noise_noises = [n for d in min_exp_darks for n in d['noise_subframes'] if n > 0]
     read_noise_mean = np.mean(read_noise_noises) if read_noise_noises else 0
     
-    # Find saturation from S-N curve
+    # Find saturation from S-N curve using a log-log deviation method
     saturation_idx = -1
     if jump_idx != -1:
         sn_jump_idx = jump_idx * 9  # Corresponding index in the subframe array
-        fit2_sn_mask = (np.arange(len(eff_signals_all)) >= sn_jump_idx) & (eff_signals_all > 0)
         
-        # Fit Gain 2 on Noise^2 vs Signal
-        s2_ns, _, _, _, _ = calculate_linregress_stats(eff_signals_all[fit2_sn_mask], noises_all[fit2_sn_mask]**2)
+        # Define a mask for a clean linear fit in log-log space, avoiding the very end which might be saturated.
+        # We'll fit up to a certain percentile of the signal in the second region to get a robust baseline.
+        fit_region_mask = (np.arange(len(eff_signals_all)) >= sn_jump_idx)
+        
+        # Only proceed if there are points in the second region
+        if np.any(fit_region_mask):
+            signals_in_region = eff_signals_all[fit_region_mask & (eff_signals_all > 0)]
+            
+            if len(signals_in_region) > SATURATION_DETECTION_CONSECUTIVE_POINTS:
+                # Use a high percentile to define the upper bound for the linear fit
+                signal_upper_bound_for_fit = np.percentile(signals_in_region, 85)
+                
+                fit_mask = fit_region_mask & \
+                           (eff_signals_all < signal_upper_bound_for_fit) & \
+                           (eff_signals_all > 0) & \
+                           (noises_all > 0)
 
-        if not np.isnan(s2_ns):
-            # Model ideal noise: Photon + Read
-            ideal_noise_sq = s2_ns * eff_signals_all + read_noise_mean**2
-            residuals_sq = noises_all**2 - ideal_noise_sq
-            std_resid_sq = np.std(residuals_sq[fit2_sn_mask])
+                # Ensure there are enough points to perform a meaningful fit
+                if np.sum(fit_mask) > 10: 
+                    log_signals_fit = np.log10(eff_signals_all[fit_mask])
+                    log_noises_fit = np.log10(noises_all[fit_mask])
+                    
+                    s_log, i_log, _, _, fit_err_log = calculate_linregress_stats(log_signals_fit, log_noises_fit)
 
-            for i in range(sn_jump_idx, len(eff_signals_all)):
-                if residuals_sq[i] < -SATURATION_DETECTION_STD_MULTIPLIER * std_resid_sq:
-                    saturation_idx = i // 9  # Convert back to index of avg_raw_signals
-                    break
+                    if not np.isnan(s_log) and fit_err_log > 0:
+                        consecutive_saturated = 0
+                        # Start checking for saturation from the beginning of region 2
+                        for i in range(sn_jump_idx, len(eff_signals_all)):
+                            if eff_signals_all[i] > 0 and noises_all[i] > 0:
+                                predicted_log_noise = s_log * np.log10(eff_signals_all[i]) + i_log
+                                residual_log = np.log10(noises_all[i]) - predicted_log_noise
+                                
+                                if residual_log < -SATURATION_DETECTION_STD_MULTIPLIER * fit_err_log:
+                                    consecutive_saturated += 1
+                                    if consecutive_saturated >= SATURATION_DETECTION_CONSECUTIVE_POINTS:
+                                        # Found the start of the saturation region
+                                        sat_start_idx = i - SATURATION_DETECTION_CONSECUTIVE_POINTS + 1
+                                        saturation_idx = sat_start_idx // 9  # Convert subframe index to avg_raw_signals index
+                                        break
+                                else:
+                                    consecutive_saturated = 0 # Reset counter if a point is back in line
+                            else:
+                                 consecutive_saturated = 0 # Reset if data is invalid
     if saturation_idx == -1: saturation_idx = len(avg_raw_signals) # No saturation found, use all points
 
     # --- Step 4: Finalize Fits with Known Boundaries ---
@@ -292,10 +322,10 @@ def analyze_and_plot_all(all_data, metadata):
         legend_labels.append(f'Read Noise: {read_noise_mean:.2f} ADU')
         
     if not np.isnan(gain1):
-        legend_labels.append(f'Gain 1: {gain1:.3f} e-/ADU (Slope: {log_s1:.4f})')
+        legend_labels.append(f'Gain 1: {gain1:.4f} e-/ADU (Slope: {log_s1:.4f})')
         legend_handles.append(plt.Line2D([0], [0], color='green', lw=2.5, label='Gain 1')) # Dummy handle
     if not np.isnan(gain2):
-        legend_labels.append(f'Gain 2: {gain2:.3f} e-/ADU (Slope: {log_s2:.4f})')
+        legend_labels.append(f'Gain 2: {gain2:.4f} e-/ADU (Slope: {log_s2:.4f})')
         legend_handles.append(plt.Line2D([0], [0], color='forestgreen', ls='--', lw=2.5, label='Gain 2')) # Dummy handle
 
     if jump_idx != -1:
