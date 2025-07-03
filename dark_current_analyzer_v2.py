@@ -48,7 +48,7 @@ GRID_MARKERS = ['o', 's', 'v', '^', '<', '>', 'D', 'p', '*']
 
 def propagate_division_error(val_a, val_b, se_a, se_b):
     # Calculates the standard error for C = A / B.
-    if val_b == 0 or val_a == 0: return np.nan
+    if val_b == 0 or val_a == 0 or np.isnan(val_a) or np.isnan(val_b) or np.isnan(se_a) or np.isnan(se_b): return np.nan
     rel_se_a = se_a / val_a
     rel_se_b = se_b / val_b
     val_c = val_a / val_b
@@ -57,7 +57,7 @@ def propagate_division_error(val_a, val_b, se_a, se_b):
 
 def propagate_multiplication_error(val_a, val_b, se_a, se_b):
     # Calculates the standard error for C = A * B.
-    if val_a == 0 or val_b == 0: return np.nan
+    if val_a == 0 or val_b == 0 or np.isnan(val_a) or np.isnan(val_b) or np.isnan(se_a) or np.isnan(se_b): return np.nan
     rel_se_a = se_a / val_a
     rel_se_b = se_b / val_b
     val_c = val_a * val_b
@@ -66,7 +66,7 @@ def propagate_multiplication_error(val_a, val_b, se_a, se_b):
 
 def propagate_sqrt_error(val_a, se_a):
     # Calculates the standard error for C = sqrt(A).
-    if val_a <= 0: return np.nan
+    if val_a <= 0 or np.isnan(val_a) or np.isnan(se_a): return np.nan
     val_c = np.sqrt(val_a)
     se_c = 0.5 * se_a / val_c if val_c != 0 else np.nan
     return se_c
@@ -74,21 +74,21 @@ def propagate_sqrt_error(val_a, se_a):
 # --- data_collection_and_processing ---
 # Functions for finding, loading, and processing the FITS image pairs.
 
-def load_fits_info(image_path):
-    # Loads a FITS image and extracts relevant header information.
+def load_fits_info(image_path, load_data=True):
+    # Loads a FITS image and/or header, and extracts relevant info.
     try:
         with fits.open(image_path) as hdul:
             header = hdul[0].header
-            img_data = hdul[0].data.astype(np.float32)
+            img_data = hdul[0].data.astype(np.float32) if load_data else None
             exposure = header.get('EXPOSURE', header.get('EXPTIME', 0.0))
             instrume = str(header.get('INSTRUME', 'N/A')).strip()
             set_temp = header.get('SET-TEMP', 'N/A')
             gain = header.get('GAIN', 'N/A')
             offset = header.get('OFFSET', 'N/A')
-        return img_data, exposure, instrume, set_temp, gain, offset
+        return img_data, header, exposure, instrume, set_temp, gain, offset
     except Exception as e:
         print(f"Error reading FITS file {image_path}: {e}")
-        return None, 0.0, 'N/A', 'N/A', 'N/A', 'N/A'
+        return None, None, 0.0, 'N/A', 'N/A', 'N/A', 'N/A'
 
 def collect_and_process_pairs(input_dir):
     # Finds all FITS files, pairs them, and calculates statistics for each 3x3 subframe.
@@ -107,8 +107,8 @@ def collect_and_process_pairs(input_dir):
         path1, path2 = all_files[i], all_files[i+1]
         print(f"Processing pair {i//2 + 1:03d}: ({os.path.basename(path1)}, {os.path.basename(path2)})")
 
-        img1, exp1, inst, temp, gain, offset = load_fits_info(path1)
-        img2, exp2, _, _, _, _ = load_fits_info(path2)
+        img1, _, exp1, inst, temp, gain, offset = load_fits_info(path1, load_data=True)
+        img2, _, exp2, _, _, _, _ = load_fits_info(path2, load_data=True)
 
         if not metadata and inst != 'N/A':
             metadata = {'instrume': inst, 'set_temp': temp, 'gain_setting': gain, 'offset_setting': offset}
@@ -148,9 +148,8 @@ def collect_and_process_pairs(input_dir):
         
     df = pd.DataFrame(all_data)
     df['exposure_time_sq'] = df['exposure_time']**2
-    # This is the spatial variance component from the sum image, which models FPN
     df['var_fpn_unscaled'] = df['var_sum'] - df['var_diff']
-    df.loc[df['var_fpn_unscaled'] < 0, 'var_fpn_unscaled'] = 0 # Variance cannot be negative
+    df.loc[df['var_fpn_unscaled'] < 0, 'var_fpn_unscaled'] = 0
 
     print(f"\nSuccessfully processed {len(df) // 9} pairs into a DataFrame with {len(df)} data points.")
     return df, metadata
@@ -163,69 +162,48 @@ def analyze_data_region(df_region):
     results = {key: (np.nan, np.nan) for key in [
         'fixed_bias_adu', 'dark_current_adu_s', 'gain_e_adu', 'read_noise_adu',
         'read_noise_e', 'dark_current_e_s', 'dsnu_e_s',
-        'var_diff_intercept', 'var_diff_slope' # Store fit parameters for plotting
+        'var_diff_intercept', 'var_diff_slope'
     ]}
     
     if len(df_region) < 3:
         print("  -> Not enough data points (< 3) for regression. Skipping.")
         return results
 
-    # --- Fit 1: Mean Signal vs. Time ---
     fit_mean = linregress(df_region['exposure_time'], df_region['mean_sum_div_2'])
-    c_mean, m_mean = fit_mean.intercept, fit_mean.slope
-    se_c_mean, se_m_mean = fit_mean.intercept_stderr, fit_mean.stderr
+    c_mean, m_mean, se_c_mean, se_m_mean = fit_mean.intercept, fit_mean.slope, fit_mean.intercept_stderr, fit_mean.stderr
     results['fixed_bias_adu'] = (c_mean, se_c_mean)
     results['dark_current_adu_s'] = (m_mean, se_m_mean)
 
-    # --- Fit 2: Variance(Difference) vs. Time ---
     fit_var = linregress(df_region['exposure_time'], df_region['var_diff'])
-    c_var, m_var = fit_var.intercept, fit_var.slope
-    se_c_var, se_m_var = fit_var.intercept_stderr, fit_var.stderr
+    c_var, m_var, se_c_var, se_m_var = fit_var.intercept, fit_var.slope, fit_var.intercept_stderr, fit_var.stderr
     results['var_diff_intercept'] = (c_var, se_c_var)
     results['var_diff_slope'] = (m_var, se_m_var)
     
-    # --- Fit 3: Variance(FPN) vs. Time^2 ---
     fit_fpn = linregress(df_region['exposure_time_sq'], df_region['var_fpn_unscaled'])
     m_fpn, se_m_fpn = fit_fpn.slope, fit_fpn.stderr
     
-    # --- Derive Physical Parameters and Propagate Errors ---
-    # Gain (K = 2 * m_mean / m_var)
     if m_var > 0:
         gain = (2 * m_mean) / m_var
         se_gain = propagate_division_error(2 * m_mean, m_var, 2 * se_m_mean, se_m_var)
         results['gain_e_adu'] = (gain, se_gain)
-    else:
-        gain, se_gain = np.nan, np.nan
+    else: gain, se_gain = np.nan, np.nan
         
-    # Read Noise (ADU and e-)
     if c_var > 0:
-        rn_adu_sq = c_var / 2.0
-        se_rn_adu_sq = se_c_var / 2.0
-        rn_adu = np.sqrt(rn_adu_sq)
-        se_rn_adu = propagate_sqrt_error(rn_adu_sq, se_rn_adu_sq)
+        rn_adu_sq = c_var / 2.0; se_rn_adu_sq = se_c_var / 2.0
+        rn_adu = np.sqrt(rn_adu_sq); se_rn_adu = propagate_sqrt_error(rn_adu_sq, se_rn_adu_sq)
         results['read_noise_adu'] = (rn_adu, se_rn_adu)
         if not np.isnan(gain):
-            rn_e = rn_adu * gain
-            se_rn_e = propagate_multiplication_error(rn_adu, gain, se_rn_adu, se_gain)
+            rn_e = rn_adu * gain; se_rn_e = propagate_multiplication_error(rn_adu, gain, se_rn_adu, se_gain)
             results['read_noise_e'] = (rn_e, se_rn_e)
             
-    # Dark Current (e-/s)
     if not np.isnan(gain):
-        dc_e_s = m_mean * gain
-        se_dc_e_s = propagate_multiplication_error(m_mean, gain, se_m_mean, se_gain)
+        dc_e_s = m_mean * gain; se_dc_e_s = propagate_multiplication_error(m_mean, gain, se_m_mean, se_gain)
         results['dark_current_e_s'] = (dc_e_s, se_dc_e_s)
         
-    # DSNU (e-/s)
     if m_fpn > 0 and not np.isnan(gain):
-        # m_fpn = 4 * (sigma_DSNU / K)^2  => sigma_DSNU = K/2 * sqrt(m_fpn)
-        term_to_sqrt = m_fpn
-        se_term_to_sqrt = se_m_fpn
-        
-        sqrt_val = np.sqrt(term_to_sqrt)
-        se_sqrt_val = propagate_sqrt_error(term_to_sqrt, se_term_to_sqrt)
-
-        dsnu_e_s = (gain / 2.0) * sqrt_val
-        se_dsnu_e_s = propagate_multiplication_error(gain/2.0, sqrt_val, se_gain/2.0, se_sqrt_val)
+        term_to_sqrt = m_fpn; se_term_to_sqrt = se_m_fpn
+        sqrt_val = np.sqrt(term_to_sqrt); se_sqrt_val = propagate_sqrt_error(term_to_sqrt, se_term_to_sqrt)
+        dsnu_e_s = (gain / 2.0) * sqrt_val; se_dsnu_e_s = propagate_multiplication_error(gain/2.0, sqrt_val, se_gain/2.0, se_sqrt_val)
         results['dsnu_e_s'] = (dsnu_e_s, se_dsnu_e_s)
 
     return results
@@ -233,53 +211,54 @@ def analyze_data_region(df_region):
 # --- plotting_and_reporting ---
 # Functions to visualize the data and results, and generate the final report.
 
-def generate_all_plots(df, all_results, metadata, output_dir, base_filename):
+def generate_all_plots(input_dir, all_results, metadata, output_dir, base_filename, df):
     # Orchestrates the creation of all plots for both ADC modes.
     print("\n--- Generating Plots ---")
-    
-    # Amp Glow Map
-    _generate_amp_glow_map(df, metadata, output_dir, base_filename)
-
-    # Plot sets for each mode
+    _generate_amp_glow_map(input_dir, output_dir, base_filename)
     df_mode1 = df[df['exposure_time'] < ADC_THRESHOLD_S]
     df_mode2 = df[df['exposure_time'] >= ADC_THRESHOLD_S]
+    if not df_mode1.empty: _generate_plot_set(df_mode1, all_results, 1, metadata, output_dir, base_filename)
+    else: print("Skipping plots for Mode 1 (<1s): No data.")
+    if not df_mode2.empty: _generate_plot_set(df_mode2, all_results, 2, metadata, output_dir, base_filename)
+    else: print("Skipping plots for Mode 2 (>=1s): No data.")
+
+def _generate_amp_glow_map(input_dir, output_dir, base_filename):
+    # Finds the longest exposure FITS file and plots it with grid lines.
+    print("Generating Amp Glow Map...")
+    all_files = [os.path.join(root, f) for root, _, files in os.walk(input_dir) for f in files if f.lower().endswith(('.fits', '.fit'))]
+    if not all_files: print("Warning: Could not find any FITS files for Amp Glow map."); return
+
+    longest_exp_path = ""
+    max_exp = -1.0
+    for p in all_files:
+        _, _, exp, _, _, _, _ = load_fits_info(p, load_data=False)
+        if exp > max_exp: max_exp = exp; longest_exp_path = p
     
-    if not df_mode1.empty:
-        _generate_plot_set(df_mode1, all_results, 1, metadata, output_dir, base_filename)
-    else:
-        print("Skipping plots for Mode 1 (<1s): No data.")
+    if not longest_exp_path: print("Warning: Could not determine longest exposure file."); return
 
-    if not df_mode2.empty:
-        _generate_plot_set(df_mode2, all_results, 2, metadata, output_dir, base_filename)
-    else:
-        print("Skipping plots for Mode 2 (>=1s): No data.")
-
-def _generate_amp_glow_map(df, metadata, output_dir, base_filename):
-    # Generates a representative amp glow map from the longest exposure.
-    if df.empty: return
-    longest_exp_time = df['exposure_time'].max()
-    longest_exp_pair_mean = df[df['exposure_time'] == longest_exp_time]['mean_sum_div_2'].mean()
+    img_data, hdr, exp, instr, temp, gain, offset = load_fits_info(longest_exp_path, load_data=True)
+    if img_data is None: return
     
     fig, ax = plt.subplots(figsize=FIG_SIZE)
-    # Placeholder for a real image, using a title to convey the info
-    ax.text(0.5, 0.5, "Amp Glow Map Placeholder\n(Full image loading omitted for speed;\nrefer to a FITS viewer for actual image)",
-            ha='center', va='center', fontsize=18, color='gray')
-    height, width = 3856, 5496 # Typical ASI183 dimensions
+    vmin, vmax = np.nanpercentile(img_data, 1), np.nanpercentile(img_data, 99.5)
+    im = ax.imshow(img_data, cmap='gray', origin='lower', vmin=vmin, vmax=vmax)
+    
+    height, width = img_data.shape
     for i in range(1, 3):
         ax.axhline(i * height / 3, color='r', linestyle=':'); ax.axvline(i * width / 3, color='r', linestyle=':')
-    for i in range(3):
-        for j in range(3):
-            ax.text(j * width / 3 + width / 6, i * height / 3 + height / 6, str(i * 3 + j),
+    for r in range(3):
+        for c in range(3):
+            ax.text(c * width / 3 + width / 6, r * height / 3 + height / 6, str(r * 3 + c),
                     fontsize=20, color='red', ha='center', va='center', weight='bold')
-    
-    title = (f"Longest Exposure: {longest_exp_time:.2f}s - Avg. Signal: {longest_exp_pair_mean:.1f} ADU\n"
-             f"{metadata.get('instrume', '')} (G:{metadata.get('gain_setting', 'NA')}, O:{metadata.get('offset_setting', 'NA')}, T:{metadata.get('set_temp', 'NA')}C)")
-    ax.set_title(title, fontsize=TITLE_FONTSIZE)
-    ax.set_xticks([]); ax.set_yticks([])
-    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    title = f"{instr} ({exp:.2f}s, {temp}C, G:{gain}, O:{offset})"
+    ax.set_title(title, fontsize=TITLE_FONTSIZE); ax.set_xlabel('X Pixel', fontsize=LABEL_FONTSIZE); ax.set_ylabel('Y Pixel', fontsize=LABEL_FONTSIZE)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.1); fig.colorbar(im, cax=cax, label='ADU')
+    fig.tight_layout()
     plot_path = os.path.join(output_dir, f"{base_filename}_amp_glow_map.png")
     plt.savefig(plot_path, dpi=150); plt.close(fig)
-    print(f"Amp Glow map placeholder saved to: {plot_path}")
+    print(f"Amp Glow map saved to: {plot_path}")
 
 def _generate_plot_set(df_region, all_results, mode_num, metadata, output_dir, base_filename):
     # Helper to generate a standardized set of 3 plots for a given data region.
@@ -293,10 +272,7 @@ def _generate_plot_set(df_region, all_results, mode_num, metadata, output_dir, b
         df_sub = df_region[df_region['subframe_index'] == i]
         if df_sub.empty: continue
         ax1.plot(df_sub['exposure_time'], df_sub['mean_sum_div_2'], marker=GRID_MARKERS[i], ls='none', color=GRID_COLORS[i], label=f'Grid {i}')
-        # Plot regression line
-        res = all_results[i][f'mode{mode_num}']
-        bias, _ = res['fixed_bias_adu']
-        dc_adu, _ = res['dark_current_adu_s']
+        res = all_results[i][f'mode{mode_num}']; bias, _ = res['fixed_bias_adu']; dc_adu, _ = res['dark_current_adu_s']
         if not np.isnan(bias):
             t_fit = np.array([0, df_region['exposure_time'].max()]) if not df_region.empty else np.array([0,1])
             ax1.plot(t_fit, bias + dc_adu * t_fit, color=GRID_COLORS[i], ls='--')
@@ -311,10 +287,7 @@ def _generate_plot_set(df_region, all_results, mode_num, metadata, output_dir, b
         df_sub = df_region[df_region['subframe_index'] == i]
         if df_sub.empty: continue
         ax2.plot(df_sub['exposure_time'], df_sub['var_diff'], marker=GRID_MARKERS[i], ls='none', color=GRID_COLORS[i], label=f'Grid {i}')
-        # Plot regression line using the actual fit parameters
-        res = all_results[i][f'mode{mode_num}']
-        intercept, _ = res['var_diff_intercept']
-        slope, _ = res['var_diff_slope']
+        res = all_results[i][f'mode{mode_num}']; intercept, _ = res['var_diff_intercept']; slope, _ = res['var_diff_slope']
         if not np.isnan(intercept):
             t_fit = np.array([0, df_region['exposure_time'].max()]) if not df_region.empty else np.array([0,1])
             ax2.plot(t_fit, intercept + slope * t_fit, color=GRID_COLORS[i], ls='--')
@@ -344,33 +317,42 @@ def generate_markdown_report(all_results, metadata, output_dir, base_filename):
         f.write(f"- **Camera:** `{metadata.get('instrume', 'N/A')}`\n")
         f.write(f"- **Settings:** Temp=`{metadata.get('set_temp', 'N/A')}C`, Gain=`{metadata.get('gain_setting', 'N/A')}`, Offset=`{metadata.get('offset_setting', 'N/A')}`\n")
         f.write(f"- **Analysis Method:** Time-based linear regression with full error propagation.\n\n")
-
-        f.write(f"## Amp Glow Map\n")
-        f.write(f"This map indicates the general location of analysis grids. The title provides info from the longest exposure pair.\n\n")
+        f.write(f"## Amp Glow Map\nThis map shows the data from the longest exposure FITS file, visualizing any amp glow and showing the analysis grid locations.\n\n")
         f.write(f"![Amp Glow Map]({os.path.basename(base_filename)}_amp_glow_map.png)\n\n")
 
         for mode_num in [1, 2]:
             mode_title = f"Mode {mode_num} (`{'<' if mode_num==1 else '>='}{ADC_THRESHOLD_S}s`)"
             f.write(f"---\n\n## Results for {mode_title}\n\n")
             
-            # Check if any data exists for this mode
             has_data = any(not np.isnan(res[f'mode{mode_num}']['gain_e_adu'][0]) for res in all_results.values())
-            if not has_data:
-                f.write("No data available for this readout mode.\n\n")
-                continue
+            if not has_data: f.write("No data available for this readout mode.\n\n"); continue
 
             f.write("| Grid | Fixed Bias<br>(ADU) | Read Noise<br>(e-) | Gain<br>(e-/ADU) | Dark Current<br>(e-/pixel/s) | DSNU<br>(e-/pixel/s) |\n")
             f.write("|:----:|:---:|:---:|:---:|:---:|:---:|\n")
+            
+            param_lists = {k: [] for k in ['fixed_bias_adu', 'read_noise_e', 'gain_e_adu', 'dark_current_e_s', 'dsnu_e_s']}
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 for i in range(9):
                     res = all_results[i][f'mode{mode_num}']
+                    for key in param_lists: param_lists[key].append(res[key][0])
                     f.write(f"| **{i}** | `{res['fixed_bias_adu'][0]:.2f} ± {res['fixed_bias_adu'][1]:.2f}` "
-                            f"| `{res['read_noise_e'][0]:.2f} ± {res['read_noise_e'][1]:.2f}` "
-                            f"| `{res['gain_e_adu'][0]:.3f} ± {res['gain_e_adu'][1]:.3f}` "
+                            f"| `{res['read_noise_e'][0]:.3f} ± {res['read_noise_e'][1]:.3f}` "
+                            f"| `{res['gain_e_adu'][0]:.4f} ± {res['gain_e_adu'][1]:.4f}` "
                             f"| `{res['dark_current_e_s'][0]:.4f} ± {res['dark_current_e_s'][1]:.4f}` "
                             f"| `{res['dsnu_e_s'][0]:.4f} ± {res['dsnu_e_s'][1]:.4f}` |\n")
-            
+                
+                # Summary Row - Corrected f-string usage
+                summary_row = (
+                    f"| **Summary** | `{np.nanmean(param_lists['fixed_bias_adu']):.2f} ± {np.nanstd(param_lists['fixed_bias_adu'], ddof=1):.2f}` "
+                    f"| `{np.nanmean(param_lists['read_noise_e']):.3f} ± {np.nanstd(param_lists['read_noise_e'], ddof=1):.3f}` "
+                    f"| `{np.nanmean(param_lists['gain_e_adu']):.4f} ± {np.nanstd(param_lists['gain_e_adu'], ddof=1):.4f}` "
+                    f"| `{np.nanmean(param_lists['dark_current_e_s']):.4f} ± {np.nanstd(param_lists['dark_current_e_s'], ddof=1):.4f}` "
+                    f"| `{np.nanmean(param_lists['dsnu_e_s']):.4f} ± {np.nanstd(param_lists['dsnu_e_s'], ddof=1):.4f}` |\n"
+                )
+                f.write(summary_row)
+
+            f.write(f"\n*Summary row shows Mean ± Standard Deviation of the 9 grid values.*\n")
             f.write(f"\n### Diagnostic Plots for {mode_title}\n\n")
             f.write(f"![Mean vs Time]({os.path.basename(base_filename)}_mode{mode_num}_1_mean_vs_time.png)\n")
             f.write(f"![Var(Diff) vs Time]({os.path.basename(base_filename)}_mode{mode_num}_2_vardiff_vs_time.png)\n")
@@ -384,12 +366,8 @@ def generate_markdown_report(all_results, metadata, output_dir, base_filename):
 def orchestrate_analysis(input_dir, output_dir):
     # Main function to run the entire analysis pipeline.
     os.makedirs(output_dir, exist_ok=True)
-    
     master_df, metadata = collect_and_process_pairs(input_dir)
-    if master_df.empty:
-        print("\nAnalysis halted: No data was collected.")
-        return
-
+    if master_df.empty: print("\nAnalysis halted: No data was collected."); return
     base_filename = f"dark_analysis_{metadata.get('instrume', 'UnknownCam').replace(' ', '_')}"
     
     print("\n--- Starting Core Analysis ---")
@@ -397,17 +375,14 @@ def orchestrate_analysis(input_dir, output_dir):
     for i in range(9):
         print(f"Analyzing Grid {i}...")
         df_sub = master_df[master_df['subframe_index'] == i].copy()
-        
         df_mode1 = df_sub[df_sub['exposure_time'] < ADC_THRESHOLD_S]
         df_mode2 = df_sub[df_sub['exposure_time'] >= ADC_THRESHOLD_S]
-        
         results_mode1 = analyze_data_region(df_mode1)
         results_mode2 = analyze_data_region(df_mode2)
-        
         all_results[i] = {'mode1': results_mode1, 'mode2': results_mode2}
 
     print("\n--- Analysis Complete. Generating Outputs. ---")
-    generate_all_plots(master_df, all_results, metadata, output_dir, base_filename)
+    generate_all_plots(input_dir, all_results, metadata, output_dir, base_filename, master_df)
     generate_markdown_report(all_results, metadata, output_dir, base_filename)
     
     csv_path = os.path.join(output_dir, f"{base_filename}_raw_metrics.csv")
