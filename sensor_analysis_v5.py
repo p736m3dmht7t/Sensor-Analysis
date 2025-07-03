@@ -9,7 +9,7 @@ from scipy.stats import linregress
 
 # --- Configuration ---
 # IMPORTANT: Set this to the directory containing your FITS images.
-INPUT_DIR = r"D:\Astrophotography\FLATS_For_Sensor_Analysis"
+INPUT_DIR = r"D:\Astrophotography\2025-07-02\DARK\Dark"
 
 # Heuristics for automatically detecting the 'jump' point in the signal-exposure curve.
 JUMP_DETECTION_STD_MULTIPLIER = 5           # How many std deviations away from initial fit for a new region
