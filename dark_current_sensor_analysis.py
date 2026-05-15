@@ -1,3 +1,10 @@
+###
+# dark_current_sensor_analysis.py
+# John Phillips
+# john.d.phillips@comcast.net
+# 2026-05-15
+###
+
 import numpy as np
 from astropy.io import fits
 from pathlib import Path
@@ -18,6 +25,9 @@ ROOT_DIR = Path(r"D:/Astrophotography/Dark Library")
 TEMPS = ["-10.00c", "-20.00c"]
 TIMES = ["0.00s", "1.00s", "2.00s", "5.00s", "10.00s", "20.00s", "50.00s", "100.00s", "200.00s", "500.00s"]
 SIGMA = 3.0
+SIGMA_LOW = 3.0          # low-side clip (keep tight to reject cosmic rays / cold pixels)
+SIGMA_HIGH = 5.0         # high-side clip (loose, to preserve hot-pixel fat right tail)
+SATURATION_ADU = 65504   # pixels at or above this are considered saturated
 ITERS = 5
 
 # Date for filename
@@ -31,17 +41,24 @@ def load_fits(file_path):
     return data
 
 def process_pair(d1, d2):
-    S = (d1 + d2) / 2.0
-    Diff = d1 - d2
-    
-    # Sigma-clipped mean on full frame for S
-    clipped_S, _, _ = sigmaclip(S, low=SIGMA, high=SIGMA)
+    # Saturation mask — drop the pixel from BOTH frames if either is saturated,
+    # so S and Diff stay paired pixel-for-pixel.
+    sat_mask = (d1 < SATURATION_ADU) & (d2 < SATURATION_ADU)
+    d1v = d1[sat_mask]
+    d2v = d2[sat_mask]
+
+    S = (d1v + d2v) / 2.0
+    Diff = d1v - d2v
+
+    # Asymmetric sigma-clipped mean on full frame for S
+    clipped_S, _, _ = sigmaclip(S, low=SIGMA_LOW, high=SIGMA_HIGH)
     mean_S = np.mean(clipped_S)
-    
-    # Sigma-clipped variance on full frame for Diff
-    clipped_Diff, _, _ = sigmaclip(Diff, low=SIGMA, high=SIGMA)
+
+    # Asymmetric sigma-clipped variance on full frame for Diff
+    # Note: Diff is symmetric around 0, so symmetric clipping is fine here.
+    clipped_Diff, _, _ = sigmaclip(Diff, low=SIGMA_HIGH, high=SIGMA_HIGH)
     var_Diff = np.var(clipped_Diff, ddof=1)
-    
+
     return mean_S, var_Diff
 
 def weighted_linear_fit(x, y, yerr):
