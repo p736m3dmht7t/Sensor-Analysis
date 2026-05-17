@@ -20,10 +20,11 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ====================== CONFIG ======================
-CAMERA_DESCRIPTION = "ZWO ASI183MM Pro S/N 262d950d2d010900 - Flat Image Gain Characterization"
-FLAT_DIR = Path(r"D:\Astrophotography\2026-05-16\FLAT\V")
+CAMERA_DESCRIPTION = "ZWO ASI183MM Pro S/N 262d950d2d010900 -10C - Flat Image Gain Characterization"
+FLAT_DIR = Path(r"D:\Astrophotography\2026-05-17\FLAT\V")
 SIGMA_LOW = 3.0          # Pixel-level low-side clip 
 SIGMA_HIGH = 5.0         # Outlier rejection threshold (residuals)
+SIGMA_SLOPE = 2.5        # Slope outlier rejection threshold
 SATURATION_ADU = 65504   # Absolute native sensor saturation ceiling
 
 # Date for filename
@@ -127,7 +128,7 @@ while True:
     
     # Standard deviation of the valid residuals
     std_residuals = np.std(valid_residuals)
-    threshold = SIGMA_LOW * std_residuals
+    threshold = SIGMA_SLOPE * std_residuals
     
     # Check absolute residuals of currently valid points
     abs_valid_residuals = np.abs(valid_residuals)
@@ -141,7 +142,7 @@ while True:
         valid_mask[drop_target] = False
         print(f"  Iteration {iteration:02d}: Dropped point at X={means_arr[drop_target]:.1f}, Residual={valid_residuals[max_res_idx_in_valid]:.1f} (> {threshold:.1f})")
     else:
-        print(f"  Convergence achieved at iteration {iteration}. All remaining residuals are < {SIGMA_HIGH} sigma.")
+        print(f"  Convergence achieved at iteration {iteration}. All remaining residuals are < {SIGMA_SLOPE} sigma.")
         break
 
 gain = 1.0 / slope_gain
@@ -187,7 +188,7 @@ txt = (
     f"  Pairs Used in Fit / Dropped : {np.sum(valid_mask)} / {num_dropped}\n"
     f"  Slope (1/Gain)              : {slope_gain:.5f} ± {sg_err:.5f}\n"
     f"  Calculated Gain             : {gain:.5f} ± {gain_err:.5f} e-/ADU\n"
-    f"  *Note: Outliers pruned iteratively using a {SIGMA_LOW}-sigma residual threshold."
+    f"  *Note: Outliers pruned iteratively using a {SIGMA_SLOPE}-sigma residual threshold."
 )
 
 fig.text(
