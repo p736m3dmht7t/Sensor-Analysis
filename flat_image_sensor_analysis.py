@@ -20,8 +20,8 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ====================== CONFIG ======================
-CAMERA_DESCRIPTION = "ZWO ASI183MM Pro S/N 262d950d2d010900 -10C - Flat Image Gain Characterization"
-FLAT_DIR = Path(r"D:\Astrophotography\2026-05-17\FLAT\V")
+CAMERA_DESCRIPTION = "ZWO ASI183MM Pro S/N 262d950d2d010900 -20C - Flat Image Gain Characterization"
+FLAT_DIR = Path(r"D:\Astrophotography\2026-05-19\FLAT\V")
 SIGMA_LOW = 3.0          # Pixel-level low-side clip 
 SIGMA_HIGH = 5.0         # Outlier rejection threshold (residuals)
 SIGMA_SLOPE = 2.5        # Slope outlier rejection threshold
